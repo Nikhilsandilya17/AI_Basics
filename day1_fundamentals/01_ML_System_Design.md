@@ -65,6 +65,19 @@ During training, the system repeatedly does this loop:
 
 For a modern LLM, training costs range from thousands to millions of dollars and takes weeks. That's why nobody retrains casually.
 
+**How step 4 actually works — backpropagation and the weight update (the mechanics interviewers probe):**
+
+Step 4 sounds like magic ("adjust every weight in the right direction") — here is what literally happens, in four sub-steps:
+
+1. **Backward pass (backpropagation):** calculus (the chain rule, applied layer by layer BACKWARDS through the network, output to input) computes, for EVERY single weight, the answer to one question: *"if this weight were nudged slightly up or down, would the loss go down, and by how much?"* That per-weight slope is its **gradient**. A big gradient = "this weight matters a lot right now — move it"; near-zero gradient = "this weight barely affects this error — leave it."
+2. **The update rule (gradient descent):** each weight takes one tiny step in the direction that reduces the loss:
+   `weight_new = weight_old − learning_rate × gradient`
+   The **learning rate** is the step size: too big → you overshoot the valley and training bounces wildly or explodes; too small → you crawl and take forever. Choosing/tuning it is one of the core practical arts of ML.
+3. **Why "descent":** picture the loss as a landscape where every point is one possible setting of all weights, and the height is how wrong the model is. Training = walking downhill on this landscape, batch by batch, until you settle into a valley (a locally-good set of weights). That's the hiker analogy made precise.
+4. **Scale:** this happens for EVERY weight (billions in an LLM) on EVERY batch — which is why training needs hundreds of GPUs for weeks, and why gradient-sharing across GPUs is a training-cluster requirement (the table below).
+
+**Fine-tuning uses this EXACT same loop** — the only difference is the starting point: instead of random weights, you start from pre-trained weights (the model already knows language; you adjust it), and run the loop briefly on a small dataset of YOUR examples. The famous practical problem: step 2 updates ALL billions of weights, needing training-scale GPUs — which is exactly what **LoRA** solves (File 02 §4.3): freeze the original weights, train only tiny adapter matrices (<1% of parameters) alongside them — same loop, 1% of the moving parts, one GPU.
+
 During inference, there is no learning. The weights are **frozen**. A request comes in, the model does forward-pass math (matrix multiplications), and out comes a prediction. One forward pass. No weight updates.
 
 **Why this matters enormously for system design (interview gold):**
