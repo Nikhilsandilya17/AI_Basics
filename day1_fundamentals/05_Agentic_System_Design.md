@@ -6,7 +6,7 @@
 
 ## Part 0: What is an "agent", really?
 
-**Plain words:** A chatbot ANSWERS. An agent ACTS.
+**The story that separates agent from chatbot:** your flight is cancelled at 1 AM. A chatbot, asked "fix my flight," replies: "I'm sorry to hear that. You can rebook by visiting Manage Booking → ..." — instructions you must follow while half-asleep. An AGENT, asked the same thing: checks your booking (tool call), finds the 7:40 AM alternate (another call), verifies your seat preference from your profile (another), rebooks you, and emails the confirmation — while you sleep. The difference is not intelligence; it's HANDS. A chatbot has a mouth; an agent has a mouth AND hands — and it uses them in a loop until the goal is done.
 
 **The definition to say in an interview:** "An agent is an LLM in a LOOP, with TOOLS and MEMORY: it thinks, acts, observes the result, and repeats until the goal is done."
 
@@ -200,9 +200,10 @@ A supervisor agent DELEGATES subtasks to worker agents, collects results, decide
 ### 3.5 Workflow Agents (deterministic-flow)
 **Plain words:** the FLOW is fixed — you write steps 1→2→3 in code; the LLM only fills the smart parts (extract, summarize, draft, classify) inside each step.
 
-Why this is the production default: predictable (the sequence is known, so tests, approvals, and audit maps are possible), cheap (LLM only where judgment is needed), debuggable (step 4 failed — look at step 4), and safe (deterministic guard points between every LLM call). Most production "agents" today are workflow agents. 
+**The story — invoice processing, the two ways:** a new agent must process invoices. Design A: "here are 20 tools and a goal — go process invoices" (autonomous). It works... 80% of the time; the other 20% it invents creative paths, retries refunds twice, and once emailed a vendor from a draft. Nobody can approve what they can't predict. Design B: YOU write the flow in code — step 1 extract fields (LLM: smart), step 2 validate (deterministic rules), step 3 if total > ₹1 lakh → human approval (fixed gate), step 4 post to ERP (deterministic). The LLM does exactly the two genuinely-smart steps; the SEQUENCE, the gates, and the money-touching are code. Now it's predictable (the sequence is known — testable, auditable), cheap (LLM only where judgment is needed), debuggable ("step 4 failed" points at step 4), and safe (deterministic guard points between every LLM call). Most production "agents" today are workflow agents — and the reason is exactly this story.
+
 ### 3.6 Autonomous Agents
-The LLM decides the flow dynamically — unknown number of steps, discovered as it goes. Maximum capability, minimum predictability. Reserve for genuinely open-ended tasks (deep research — §6.2), wrapped in budgets, permissions, checkpoints, HITL gates on irreversible actions. The pattern behind "deep research" products.
+The LLM decides the flow dynamically — unknown number of steps, discovered as it goes. Maximum capability, minimum predictability. Design A above — the 80% one. Reserve for genuinely open-ended tasks (deep research — §6.2), wrapped in budgets, permissions, checkpoints, HITL gates on irreversible actions. The pattern behind "deep research" products.
 
 **THE interview answer for "workflow vs autonomous":** "I default to workflow agents — deterministic skeleton with LLM for the smart steps — because they're predictable, testable, and cheap. Full autonomy only where the steps genuinely can't be enumerated ahead (open-ended research, exploratory debugging), and always wrapped in stop conditions, cost budgets, tool permissions, and human approval on irreversible actions. Autonomy is a cost you buy only when the use case demands it."
 

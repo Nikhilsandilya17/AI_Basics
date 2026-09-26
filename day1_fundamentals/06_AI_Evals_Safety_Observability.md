@@ -6,9 +6,9 @@
 
 ## Part 0: The mental model
 
-**Plain words:** in normal software, if the server returns 200, the output is correct — code either works or doesn't. In AI, the server can return 200 and the ANSWER can still be wrong, biased, unsafe, or leak data.
+**The story that motivates the entire track:** you run a payments API. Traditional monitoring: p99 latency 120ms, error rate 0.01%, uptime 99.99% — every dashboard green, every alert quiet. Meanwhile, a customer asks your AI assistant "How do I change my registered mobile number?" and it confidently replies with steps for the OLD app, from 2023, citing a page that moved. Servers: 200. Logs: clean. Dashboards: green. **Customer: misled.** No traditional tool fired, because no traditional tool looks at the PAYLOAD — they all watch the pipeline. That gap — "the system is up and the answer is wrong" — is why this track exists.
 
-**The full framing — why an entire track exists for this:** every traditional SRE tool watches the PIPELINE (latency, errors, throughput). No traditional tool watches the PAYLOAD. AI observability = classic SRE metrics + **output quality metrics** + **safety enforcement** + **AI-specific failure modes** (provider outages, prompt abuse, cost attacks). The three pillars of this file:
+**The full framing:** every traditional SRE tool watches the PIPELINE (latency, errors, throughput). No traditional tool watches the PAYLOAD. AI observability = classic SRE metrics + **output quality metrics** + **safety enforcement** + **AI-specific failure modes** (provider outages, prompt abuse, cost attacks). The three pillars of this file:
 1. **Evaluation** — measuring output quality (before AND after deployment)
 2. **Safety** — preventing harmful outputs and attacks
 3. **Reliability** — surviving provider outages, abuse, and cost explosions
@@ -145,7 +145,11 @@ The new model/prompt runs on a COPY of live traffic; outputs logged and compared
 1% of real traffic to the new version; watch quality + safety + cost; ramp 5% → 25% → 100%; auto-rollback on regression thresholds. The standard AI release path — say "canary with automatic rollback on quality AND guardrail metrics" and the interviewer knows you've shipped ML before.
 
 ### 2.12 Prompt Versioning
-**Prompts are code.** They change behavior; they regress; they break. Version them in git; tie every request log to its prompt version (so "quality dropped Tuesday" resolves to "prompt v17 shipped Tuesday"); A/B and shadow prompt versions; instant rollback. Prompt regressions are the single most common production AI incident — this discipline is boring and non-negotiable.
+**Prompts are code.** They change behavior; they regress; they break.
+
+**The story every team lives:** Friday 4 PM, an engineer "improves" one line of the system prompt — "made the tone more professional." Ships it, goes home. Monday morning: support tickets doubled. The answer tone IS more professional — and the new wording broke the citation format the downstream parser expected (one line changed, everything shifted). Nothing in the code changed; git blame shows nothing; the deploy log shows nothing. The ONLY artifact that changed was a string in a config. Now the painful questions: what exactly did the old prompt say? When did it change? Who changed it? Roll it back to WHAT? — and the team realizes they can't answer any of them, because the prompt lived in a config nobody versioned.
+
+**The discipline that prevents the sequel:** version prompts in git; tie every request log to its prompt version (so "quality dropped Tuesday" resolves to "prompt v17 shipped Tuesday" — in minutes, not a war-room); A/B and shadow prompt versions; instant rollback. Prompt regressions are the single most common production AI incident — this discipline is boring and non-negotiable.
 
 ### 2.13 Model Versioning
 Providers deprecate models and sometimes update them QUIETLY (same name, changed behavior — it has happened at major providers). Pin model versions in production; test any upgrade against golden sets BEFORE switching; treat provider notices as inputs to your release process. 
@@ -244,7 +248,10 @@ It WILL happen — every major provider has had multi-hour outages. The plan mus
 (Reliable mechanics in File 03 §2.4–2.5.) The reliability additions: fallback chains must cross PROVIDERS (same-provider fallback shares the outage); fallback pairs must be PARITY-TESTED on golden sets (§2.1) — otherwise failover silently degrades quality; health checks drain failing providers BEFORE user-visible failure rates spike.
 
 ### 4.4 Circuit Breakers
-Classic pattern applied per provider: after N consecutive failures, STOP calling the failing provider for a cooldown (stop hammering a dying service — retry storms make outages worse and burn your timeouts); probe occasionally (half-open) to test recovery; close the breaker when healthy again. Prevents "one dead provider consuming all your request threads."
+
+**The story that explains the name (it's an electrical metaphor — say it this way):** in your house, a short circuit trips the breaker and cuts power to that circuit INSTANTLY — because the alternative is wires overheating. Same dynamics: your provider starts failing. Naive retry logic hammers it harder — every failed request gets retried, each retry adds load to a struggling service, the provider gets worse, your retries multiply (a retry storm) — the "wires overheat," and your own request threads/timeouts all burn against a dead provider, leaving nothing for fallback paths. The breaker stops this: after N consecutive failures, STOP calling that provider for a cooldown period. You're not giving up on it — you're refusing to make the outage worse AND freeing your capacity to serve via fallback. During cooldown, probe occasionally (half-open state — one test request); if it succeeds, close the breaker and restore full traffic; if not, back to open.
+
+Three states to name: **closed** (normal), **open** (blocked, cooldown), **half-open** (probing for recovery). The pattern's payoff: "one dead provider consuming all your request threads" becomes impossible — failure gets CONTAINED, like electricity.
 
 ### 4.5 Timeout Handling
 Aggressive timeouts — users prefer a fast error to a 30-second hang — then fallback (§4.2). Layered: per provider call, per request, per agent step, per agent run (File 05 §4.6). Budget them: retries × timeouts must fit inside the user's patience.
@@ -273,7 +280,9 @@ Attacks on AI systems that cost money or extract value: token exhaustion (§4.8)
 ### 4.8 Token Exhaustion
 Users/agents burning token budgets — huge contexts, infinite loops, accidental or deliberate. Controls: per-request max tokens (input AND output caps), per-tenant token buckets (File 03 §1.10), per-run agent budgets (File 05 §4.7), burn-rate alerts. 
 ### 4.9 Cost Attacks
-Deliberate spend inflation: giant prompts (send 200k tokens × 100 req/s), output-maximizing queries ("explain everything in maximum detail, 50k words"), concurrent floods. Defenses: request size caps, output caps, per-tenant rate limits and cost anomaly detection ("this tenant spent 40× their baseline in an hour" → auto-alert/auto-throttle). These attacks are quiet — nobody crashes, the bill just grows. Cost monitoring is a security function.
+Deliberate spend inflation: giant prompts (send 200k tokens × 100 req/s), output-maximizing queries ("explain everything in maximum detail, 50k words"), concurrent floods.
+
+**The story — the quiet heist (why this deserves 'attack' status):** nobody crashes, nothing breaks, no log shows an error. A user scripts 100 requests/sec, each carrying a 150k-token prompt (padded with filler text) — "summarize this." Your bill for the afternoon: ₹11 lakh. No alarm fired, because no METRIC was watching spend velocity. Compare with the loud attacks everyone defends against (DDoS = errors, spikes = latency alerts) — this one is SILENT: the bill just grows. That silence is the design insight: **cost monitoring is a security function**, not just a finance report. Defenses: request size caps, output caps, per-tenant rate limits and cost anomaly detection ("this tenant spent 40× their baseline in an hour" → auto-alert/auto-throttle).
 
 ### 4.10 Rate Limiting (AI edition)
 Layered: requests/min + tokens/min + concurrent requests + per-tenant quotas + priority classes (File 03 §1.10), plus queue fairness so one tenant's burst doesn't starve others. AI rate limiting is at least 4-dimensional; requests/min alone is a fiction.

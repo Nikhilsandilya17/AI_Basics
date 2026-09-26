@@ -6,12 +6,13 @@
 
 ## Part 0: Why RAG exists (the mental model)
 
-**Plain words:** LLMs are frozen — they only know what they trained on. Your company's docs, this week's numbers, private knowledge don't exist for them. RAG = don't teach the model the facts; **hand it the relevant facts at question time.**
+**The story that explains the whole idea (like the spam-filter story in File 01):**
 
-**Full explanation — why not the alternatives, each eliminated in turn:**
-- *Why not a bigger model?* No model knows your private data, and world knowledge is frozen at training time. Bigger ≠ more current, and no size knows your Confluence.
-- *Why not fine-tuning?* (File 02 §4.3) Fine-tuning shapes BEHAVIOR, not a searchable knowledge base: you'd retrain every time docs change (daily), it can't cite sources, and weights are a terrible database — they can't "look up," they pattern-complete. Facts injected into weights also leak and blend imprecisely.
-- *So: RAG.* Facts live in a retrievable index that updates in minutes; the model gets exactly the relevant context per question and can cite it. Knowledge problem → retrieval problem.
+You're building "ChatGPT for your company." Day 1, the CEO asks it: "What's our refund policy for enterprise customers?" The model answers confidently... with a GENERIC policy it half-remembers from public internet text. Wrong company, wrong policy, stated with total confidence. Now you have three paths:
+
+- *Path 1 — buy a bigger model.* But no model, however big, has ever read your Confluence. It was trained on the public internet; your refund policy lives behind your login. Bigger ≠ more current, and no size knows your private docs. Dead end.
+- *Path 2 — fine-tune the model on our docs.* You feed it all your policies. Two weeks later the policy CHANGES (policies change weekly). Your fine-tuned model now answers with LAST month's policy — confidently. Retrain every week? And when the answer is wrong, it can't even say WHICH document it used — weights can't cite sources. And models are poor at fact-lookup from weights anyway: they pattern-complete, they don't query. Dead end.
+- *Path 3 — stop teaching the model facts; HAND it the facts at question time.* Keep policies in a searchable index that updates in minutes. When the CEO asks, FIND the two relevant paragraphs, paste them into the prompt, and tell the model: "answer from this." Now the answer is current, correct, and citable — "per refund_policy.pdf §4.2". Knowledge problem → retrieval problem. **That's RAG.**
 
 **Analogy:** closed-book exam (pure LLM) vs open-book exam (RAG). The model doesn't memorize the textbook; it looks up the right page, then answers using it — with the page number shown (citations).
 
@@ -21,7 +22,7 @@ INDEXING (offline):  Documents → Parse → Chunk → Embed → Index → Vecto
 RETRIEVAL (online): Query → Query Processing → Retrieval → Hybrid Search → Reranking → Context Builder → LLM
 ```
 
-**The iron law of RAG quality (recite this in every RAG answer):** *retrieval quality caps answer quality.* If the right chunk was never retrieved, the best LLM in the world cannot answer correctly — worse, it will answer anyway, from memory or thin air, with full confidence (hallucination). This is why RAG debugging always starts in the retrieval half: it's cheap to measure (no LLM needed — §4.5), and it gates everything downstream.
+**The iron law of RAG quality (recite this in every RAG answer):** *retrieval quality caps answer quality.* If the right chunk was never retrieved, the best LLM in the world cannot answer correctly — worse, it will answer anyway, from memory or thin air, with full confidence (hallucination). It's like handing a brilliant lawyer the WRONG case file: their brilliance builds a confident argument on the wrong facts. This is why RAG debugging always starts in the retrieval half: it's cheap to measure (no LLM needed — §4.5), and it gates everything downstream.
 
 ---
 
@@ -29,12 +30,12 @@ RETRIEVAL (online): Query → Query Processing → Retrieval → Hybrid Search �
 
 ### 1.1 Parse
 
-**Plain words:** extract clean text from messy sources — PDFs, HTML, slides, images, audio, spreadsheets.
+**The story that makes it unforgettable — the two-column tragedy:** an enterprise team indexes their policy wiki. Everything "works" — queries return answers, citations link to documents. Then a user asks about the parental leave policy and gets a confidently wrong answer citing the right document. The team debugs for a week. The culprit? Their PDF parser read the two-column policy PDF **line by line across both columns** — producing text like "Employees are entitled Elleon maternity leave" + "to 26 weeks of leave the company will" interleaved. The information was IN the index, shredded into nonsense. The model answered from shredded nonsense with total confidence. **Garbage in the index = garbage answers forever, silently** — no error, no alarm, just confident wrongness at scale. This is the failure mode that kills enterprise RAG projects, and it happens at step ONE.
 
-**Full explanation — why this stage kills enterprise RAG projects:** a PDF is a VISUAL layout, not a text document. The text is positioned glyphs on pages: two-column articles interleave lines left-right; headers/footers/page-numbers pollute every page; tables are spatial arrangements the parser reads as word soup ("Qty 5 Price 200 Total 1000" — meaningless without structure). After parsing, the "content" can be unrecognizable — and every downstream stage (chunking, embedding, retrieval, answering) inherits the damage. **Garbage in the index = garbage answers forever, silently.**
+Why PDFs do this: a PDF is a VISUAL layout, not a text document — positioned glyphs on pages. Two-column articles interleave lines left-right; headers/footers/page-numbers pollute every page; tables are spatial arrangements a naive parser reads as word soup ("Qty 5 Price 200 Total 1000" — meaningless without structure).
 
 **The engineering reality — budget serious time for parsing. Approaches in increasing sophistication:**
-1. **Basic extractors** (PyMuPDF, pdfplumber) — fine for clean text PDFs, terrible for layouts.
+1. **Basic extractors** (PyMuPDF, pdfplumber) — fine for clean text PDFs, terrible for layouts. (The two-column tragedy starts here.)
 2. **Structure-aware parsers** (Unstructured, LlamaParse, Azure Document Intelligence) — detect headings, tables, columns; preserve structure.
 3. **LLM-based parsing** — an LLM reads the page (image or text) and outputs clean structured text; expensive per page but handles anything; right for high-value documents.
 4. **Tables deserve special handling:** parse into structured rows, or keep them as images for multimodal retrieval (the model reads the table image directly).
@@ -43,17 +44,13 @@ RETRIEVAL (online): Query → Query Processing → Retrieval → Hybrid Search �
 
 ### 1.2 Chunking
 
-**Plain words:** split long documents into pieces small enough to retrieve individually.
-
-**The full reasoning — why chunk at all, and why the size is a trade-off dial:**
-- **Too BIG:** the embedding of a 5,000-token chunk must summarize everything in it — it becomes "about everything," which means "about nothing" in vector space (a diluted embedding matches nothing precisely). Plus big chunks waste context budget (File 02 §1.3).
-- **Too SMALL:** a 50-token fragment like "...increased by 15% quarter over quarter" retrieves beautifully (specific!) but answers nothing (context-free — increased WHAT?). The chunk must carry enough surrounding meaning to be useful alone.
+**The story — the two failure shapes (know both cold, they ARE the trade-off):** you must cut documents into retrievable pieces. Cut TOO BIG: a 5,000-token chunk covering "pricing, refunds, delivery, and SLAs" gets one embedding that must summarize EVERYTHING — it becomes "about everything," which in vector space means "about nothing" (it matches all queries weakly, none precisely). Like a hotel that's "near everything" — useful for no specific need. It also eats context budget (File 02 §1.3). Cut TOO SMALL: a 50-token fragment — "...increased by 15% quarter over quarter" — retrieves BEAUTIFULLY (so specific! matches "growth rate" queries perfectly) and answers NOTHING (increased WHAT? 15% of WHAT?). A perfect match to the question and useless on arrival. Every chunk must thread the needle: specific enough to match precisely, complete enough to answer alone.
 
 **Strategies, one by one, with when to use each:**
-1. **Fixed-size with overlap:** split every ~500 tokens with 10–20% overlap. The overlap protects sentences that straddle a boundary from being destroyed. Simple, robust, a genuinely strong baseline — start here, measure, then evolve.
-2. **Recursive/structural:** split on document structure first (markdown headings, sections, paragraphs), fall back to size limits when a section is too big. Respects the author's semantics — a "Pricing Policy" section stays whole. Better than fixed on structured corpora.
+1. **Fixed-size with overlap:** split every ~500 tokens with 10–20% overlap. The overlap protects sentences that straddle a boundary from being destroyed — the same paragraph's ending appears at the start of the next chunk, so a cut through a sentence doesn't lose it. Simple, robust, a genuinely strong baseline — start here, measure, then evolve.
+2. **Recursive/structural:** split on document structure first (markdown headings, sections, paragraphs), fall back to size limits when a section is too big. Respects the author's semantics — a "Pricing Policy" section stays whole, the way the author intended it to be read.
 3. **Semantic:** split where meaning shifts — compute embedding similarity between consecutive sentences; cut where similarity drops. Fancy, marginal gains over structural in most real corpora; costs an embedding pass.
-4. **Parent-child (small-to-big) — the pattern to name-drop:** INDEX small precise child chunks (they match queries well) but at answer time EXPAND to the parent section (it carries the full context the answer needs). Best of both worlds; standard practice in serious RAG systems.
+4. **Parent-child (small-to-big) — the pattern to name-drop:** INDEX small precise child chunks (they match queries well) but at answer time EXPAND to the parent section (it carries the full context the answer needs). The fishing hook is small; the fish you pull up is the whole filet. Best of both worlds; standard practice in serious RAG systems.
 
 **Numbers to anchor:** sweet spot typically 256–1024 tokens with 10–20% overlap; overlap in tokens, not sentences; tune against retrieval evals (§4.5), not vibes — the right number is a property of YOUR corpus.
 
@@ -167,14 +164,14 @@ Search by meaning (dense vectors). Strength: paraphrases, cross-lingual (multili
 
 ### 3.5 HNSW (Hierarchical Navigable Small World)
 
-**The algorithm behind most vector DBs — be able to explain it in plain words:**
+**The algorithm behind most vector DBs — be able to explain it in plain words.**
 
-**The structure — a country's road system in layers over the same cities:**
-- Top layer: a few "highway" nodes with long links between distant regions.
-- Each lower layer: more nodes, shorter links.
-- Bottom layer: EVERY vector is a node, connected to nearby neighbours.
+**The picture (one image — a country's road system):** imagine all 10M vectors are cities. Now build THREE road maps of the same country, stacked:
+- **Top layer:** a few "highway" cities with long expressway links spanning the entire country.
+- **Middle layers:** more cities, shorter links — state highways.
+- **Bottom layer:** EVERY city, connected to its local neighbourhood by small streets.
 
-**The search:** start at the top layer. Greedily hop: from the current node, look at neighbors, move to whichever is closest to the query; repeat until no neighbor is closer (local minimum on this layer). Then drop one layer down (finer roads, more nodes) and continue. At the bottom layer you're doing fine-grained search within the right neighbourhood. Never compared against the whole corpus — each layer eliminates huge regions wholesale.
+**Finding the closest city to a target (the search):** start at the top. On the highway map, hop greedily toward the target — each hop, look at your neighbors, move to whichever is closest to the target; stop when no neighbor is closer (you're in the right REGION of the country). Drop one layer down — state highways, finer coverage — hop again. Drop again — local streets, you're now doing fine-grained search within the right neighbourhood. You never surveyed the whole country: each layer eliminated huge regions wholesale.
 
 **A worked HNSW search trace (follow it once — you can then explain HNSW forever).** Query vector Q; 10M vectors; 3 layers; say each hop inspects ~10 neighbors:
 ```
@@ -242,12 +239,12 @@ The senior answer: soft isolation for scale, hard isolation for the most sensiti
 
 ### 4.2 Permission-Aware RAG (the classic interview trap)
 
-**The trap, fully told:** employee A can see doc X, employee B cannot. Index the docs naively, and B's semantic search happily retrieves X's content into the LLM's context — the LLM answers with it, citations and all. RAG silently bypasses every file permission the company ever set. It's not a hypothetical — it's THE first security bug in every enterprise RAG deployment.
+**The trap, told as the story it always is:** Employee A works on Project Phoenix — can see its design docs. Employee B doesn't. The company launches "ChatGPT for the intranet." The engineering team indexes the wiki — including Phoenix docs — and everyone starts asking questions. B, curious, asks: "What are the goals of Project Phoenix?" The RAG system does its job PERFECTLY: retrieves the Phoenix chunk, hands it to the LLM, and the LLM answers — beautifully, with citations. B just read a confidential project through the AI assistant, bypassing every file permission the company ever configured. Nobody hacked anything; the system worked as designed. This is not a hypothetical — it's THE first security bug in every enterprise RAG deployment, and interviewers love it because the fix is counterintuitive (it's not in the model, and not in the prompt).
 
 **The rules (memorize):**
-1. Enforce ACL at RETRIEVAL time — the metadata filter INSIDE the search (§3.6 pre-filter), never after, never by prompt ("only use documents the user may see" — prompts are not security).
-2. Permissions change AFTER indexing: a doc declassified or restricted post-indexing must update the index's ACL metadata — track permission versions; re-check live ACL for high-stakes deployments.
-3. "Permission drift" (docs whose ACLs changed since indexing) is a real production failure mode — audit it periodically.
+1. **Enforce ACL at RETRIEVAL time — the metadata filter INSIDE the search** (§3.6 pre-filter), never after, never by prompt. "Only use documents the user may see" in the system prompt is a REQUEST, not a wall — prompts are not security. B's query must never even CANDIDATE the Phoenix chunk.
+2. **Permissions change AFTER indexing:** a doc declassified or restricted post-indexing must update the index's ACL metadata — track permission versions; re-check live ACL for high-stakes deployments.
+3. **"Permission drift"** (docs whose ACLs changed since indexing) is a real production failure mode — audit it periodically.
 
 ### 4.3 Document Updates
 Event-driven incremental: changed docs → re-parse → re-chunk → re-embed → upsert, with IDEMPOTENT chunk IDs (doc_id + section_hash) so re-indexing replaces rather than duplicates; deletions tombstoned. Half-updated documents must not be served (version gating).

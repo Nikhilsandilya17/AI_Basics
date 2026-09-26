@@ -8,15 +8,17 @@
 
 ### 1.1 GPU vs CPU Inference
 
-**Plain words:** a CPU is a few genius workers; a GPU is thousands of average workers doing simple math simultaneously. LLM inference = millions of small matrix multiplications, massively parallel → GPU territory.
+**The kitchen story (tells you the whole concept in one image):** a restaurant gets two kinds of orders. Order A: "design a new menu" — one master chef (CPU core), thinking deeply, making complex decisions one after another. Order B: "chop 10 million carrots, all the same way" — the master chef would take a decade; but 5,000 line cooks each doing one simple chop, all at once (GPU), finish before lunch. An LLM forward pass is exactly Order B: a handful of giant matrix multiplications — "multiply and add these millions of number pairs" — same simple operation, repeated at massive scale. That's why LLM serving = GPUs, and why the rule "CPU for logic, GPU for math" exists.
 
-**Full explanation — why the hardware shapes the workload:** a CPU core is designed to execute complex instruction streams fast, one after another — brilliant at branching logic, business rules, serialization. A GPU packs thousands of simpler cores that all perform the SAME operation on DIFFERENT data at the same instant (SIMD). A model forward pass is a handful of giant matrix multiplications — each one is "multiply and add these millions of number pairs" — exactly the shape GPUs were built for. That's the entire reason LLM serving = GPUs.
+**Formally:** a CPU core executes complex instruction streams fast, one after another — brilliant at branching logic, business rules, serialization. A GPU packs thousands of simpler cores that all perform the SAME operation on DIFFERENT data at the same instant (SIMD). A model forward pass is exactly that shape.
 
 **When CPU is still right (know the boundary):** small models (≤1–3B), short contexts, low traffic, and workloads that are mostly pre/post-processing (tokenization, validation, business logic — normal code). A 1B model classifying support tickets at 100 req/min is a CPU workload; a 70B chat model is not.
 
 **The architectural point to make in interviews:** the serving stack AROUND the model — auth, routing, guardrails, metering — is CPU work and scales like normal services. The model itself is GPU work and scales by GPU economics. Keep them decoupled: the gateway tier scales independently of the inference fleet — exactly why a gateway sits between apps and model endpoints.
 
 ### 1.2 GPU Memory — the fundamental constraint
+
+**The story that makes it stick — the restaurant-table story:** your GPU is a restaurant with 80 GB of floor space. The model (8B, FP16) is a 16 GB buffet counter — FIXED, always there, whether one guest or thirty. Every active REQUEST is a dinner party that needs its own table: ~2 GB each (their KV cache — File 02 §2.4). The waiters (compute) can easily serve 40 tables at once — that's not the limit. The FLOOR is the limit: 80 − 16 buffet = 64 GB, minus 5 for the kitchen (activations/overhead) → 59 GB of tables → **~30 requests at a time**. Guest 31 waits at the door NOT because the kitchen is busy (GPU compute might be at 40%!) but because there's no floor for their table. That's the counterintuitive punchline of LLM serving: **the queue forms because of memory, not compute** — and every capacity conversation in this track is really about floor space.
 
 **The equation to memorize (it governs everything in this track):**
 ```
@@ -30,10 +32,10 @@ GPU memory = model weights (fixed) + KV cache (per concurrent request) + activat
 
 Arithmetic: 80 − 16 (weights) − ~5 (overhead/activations) = ~59 GB available for KV cache → at ~2 GB per concurrent request ≈ **25–30 concurrent requests per GPU.** Not thousands. Not hundreds. Thirty.
 
-**The punchline and its consequences:** concurrency per GPU is limited by MEMORY, not compute. The GPU may sit at 40% compute utilization while requests queue — the KV cache is full. Three levers raise concurrency:
-1. Shrink the fixed part — quantize weights (File 02 §3.1): 16 GB → 8 GB frees 8 GB → 4 more concurrent requests.
-2. Shrink the per-request part — cap context length: 8k → 4k halves KV per request → doubles concurrency.
-3. Waste less — PagedAttention (§1.9): naive preallocation wastes 60–80% of KV memory; paging recovers it → 2–4× more concurrency from the same hardware.
+**And the three levers are all "floor-space" moves (trace each back to the restaurant):**
+1. **Shrink the buffet — quantize weights** (File 02 §3.1): 16 GB → 8 GB frees 8 GB → 4 more tables.
+2. **Shrink each party — cap context length:** 8k → 4k halves each table's size → doubles table count.
+3. **Stop wasting floor — PagedAttention** (§1.9): naive systems rope off each table for the BIGGEST party it might host (32k max) even when 2 show up — 60–80% of the floor wasted. Paging sets exact table sizes.
 
 Every capacity conversation in LLM serving is these three levers.
 
@@ -41,23 +43,22 @@ Every capacity conversation in LLM serving is these three levers.
 
 **Plain words:** N identical copies of the model behind a load balancer — standard scale-out, with two GPU twists.
 
-**The twists, concretely:**
-1. **Cost floor:** each replica holds the full model in GPU memory — a 70B FP16 replica burns 140 GB (2+ GPUs) before serving a single token. Replicas are expensive even when idle; right-sizing replica count IS cost engineering.
-2. **Cold start:** loading tens of GB of weights from storage and warming up takes MINUTES, not seconds. Reactive scaling ("traffic spiked, spin a pod") fails — the spike is over before the replica is warm. So: warm pools (pre-started replicas absorbing bursts) or over-provisioning during known peaks, and scale-down that is slow and hysteresis-driven (§1.6).
+**The twist, as a story:** in the CPU world, adding a replica is hiring another waiter — 10 seconds to onboard, cheap, starts immediately. In the GPU world, adding a replica is opening another BRANCH of the restaurant: the buffet (model weights, tens of GB) must be physically trucked in and set up before the first guest — and that takes MINUTES, not seconds. Two consequences follow:
+
+1. **Cost floor:** each replica holds the full model in GPU memory — a 70B FP16 replica burns 140 GB (2+ GPUs) before serving a single token. Like paying full rent on a branch whether or not customers come — replicas are expensive even when idle; right-sizing replica count IS cost engineering.
+2. **Cold start kills reactive scaling:** "traffic spiked, spin up a pod!" — by the time the weights are loaded and warmed (minutes), the spike is over. It's like deciding to open a new restaurant branch because today was busy. So GPU fleets need: warm pools (pre-started replicas absorbing bursts, like keeping a part-staffed branch ready during festival season), or over-provisioning during known peaks, and scale-down that is slow and hysteresis-driven (§1.6).
 
 ### 1.4 Request Queues
 
-**Plain words:** when all replicas are busy, requests wait — with timeout, priority, and fairness rules.
+**The airport story (one image covers all five design points):** requests are passengers arriving at an airport. All check-in counters (model replicas) busy → passengers queue. Now watch what a WELL-DESIGNED airport does — each detail maps to a queue requirement:
 
-**Full explanation — walk through what a well-designed LLM queue needs, requirement by requirement:**
+1. **Timeout per queued request** — the airport doesn't make you stand at security forever: after 30 minutes, you're told clearly ("your wait exceeded the limit — here's your rebooking options"). Waiting forever is worse than a fast failure — return a clear 429-style error with retry-after guidance, never let clients hang and retry blindly.
+2. **Priority classes** — business-class check-in exists because a 30-second transaction for one traveler shouldn't wait behind a tour group of 200. Interactive chat users must jump ahead of a nightly batch job scoring 100k documents; priority queues make that explicit — without them, batch jobs poison interactive latency.
+3. **Fairness across tenants** — without it, one airline's delayed flight floods the counters and every OTHER airline's passengers freeze (the noisy neighbour — §1.11). Weighted-fair or per-tenant-cap queuing fixes it.
+4. **Admission control** — a full terminal closes its doors: better to REJECT at the entrance with a clear error than let 5,000 people stand in a corridor with no fire-safety margin. A bounded queue that sheds load protects in-flight requests from latency collapse (load shedding — File 06 §4.6).
+5. **Observability** — the flight-information screens. Queue depth and queue-wait-time are first-class metrics: they're your autoscaling signal (§1.6) and your "users are suffering" alarm. Queue depth trending up at 2 PM daily = capacity story before users complain.
 
-1. **Timeout per queued request** — waiting forever is worse than a fast failure. When the clock runs out, return a clear 429-style error with retry-after guidance rather than letting clients hang and retry blindly.
-2. **Priority classes** — interactive chat users should jump ahead of a nightly batch job scoring 100k documents. Priority queues make that explicit; without them, batch jobs poison interactive latency.
-3. **Fairness across tenants** — without fairness controls, one tenant's burst floods the queue and everyone else's TTFT explodes (the noisy neighbour — §1.11). Weighted-fair or per-tenant-cap queuing fixes it.
-4. **Admission control** — better to REJECT early with a clear error than QUEUE forever: a bounded queue that sheds load protects in-flight requests from latency collapse (load shedding — File 06 §4.6).
-5. **Observability** — queue depth and queue-wait-time are first-class metrics: they're your autoscaling signal (§1.6) and your "users are suffering" alarm. Queue depth trending up at 2 PM daily = capacity story before users complain.
-
-**Why queues matter more than people think:** queue wait is part of user-perceived latency — `latency = queue + TTFT + generation` (File 02 §1.7). A model that answers in 200ms behind an 8-second queue is a slow product. Capacity planning (Part 4) exists to keep P99 queue wait near zero.
+**Why queues matter more than people think:** queue wait is part of user-perceived latency — `latency = queue + TTFT + generation` (File 02 §1.7). A model that answers in 200ms behind an 8-second queue is a slow product — like the world's best chef cooking in 5 minutes while you wait 2 hours for a table. Capacity planning (Part 4) exists to keep P99 queue wait near zero.
 
 ### 1.5 Model Routing (inside your fleet)
 
@@ -72,9 +73,9 @@ Every capacity conversation in LLM serving is these three levers.
 **The cascade pattern, concretely (the workhorse of cost engineering):** request arrives → small model answers → confidence check → high confidence: return (most requests end here, cheap); low confidence: escalate to large model (few requests, but the hard ones come back right). The engineering crux is the confidence signal — miscalibrated and you escalate everything (expensive) or nothing (wrong answers). 
 ### 1.6 Autoscaling (GPU edition — genuinely different from CPU)
 
-**CPU world:** pod starts in seconds, is cheap, is stateless — autoscaling is easy and boring.
+**The story that captures all four differences — the hospital:** CPU-world autoscaling is a clinic adding chairs as patients arrive — chairs cost nothing and appear in seconds. GPU-world autoscaling is a hospital adding an operating room: you can't just buy one mid-afternoon (they're scarce — quota, procurement waitlists), it takes a day to sterilize and staff (minutes-long cold start — weights), it costs 10–100× a chair, and worst of all, opening one for the 3 PM rush then closing it at 4 PM and reopening at 5 PM burns enormous money for nothing (flapping). BUT — the operating room has a superpower a chair doesn't: one surgeon (GPU) can operate on 30 patients simultaneously (batching — File 02 §2.5), absorbing a sudden crowd without ANY new rooms. That's why GPU fleets have built-in burst tolerance CPU services lack.
 
-**GPU world — four differences, each with its consequence:**
+**Formally — the four differences, each with its consequence:**
 1. **Scarcity:** GPUs are node-bound (a pod needing a GPU must land on a node that has one — the device plugin), often quota-limited; you can't "just scale out" — there may be nothing to scale onto.
 2. **Cold start:** minutes (weights + warmup — §1.3), so reactive scaling lags spikes badly.
 3. **Cost:** 10–100× CPU per unit; flapping (scale up, scale down, scale up) burns money with nothing to show.
@@ -126,14 +127,14 @@ Covered fully in File 02 §2.6. The serving-stack view to add here: the schedule
 
 ### 1.9 KV-Cache Management (PagedAttention)
 
-**The problem, quantified:** naive serving pre-allocates CONTIGUOUS KV memory per request for its MAXIMUM possible context. A request allowed 32k tokens but actually using 2k wastes 30k tokens' worth of reserved memory. Measured in early serving stacks: 60–80% of KV memory wasted to preallocation and fragmentation. That waste is directly lost concurrency — §1.2's arithmetic again.
+**The hotel-booking story (which is literally what PagedAttention fixed):** old serving systems reserved KV memory like a hotel that books by the MAXIMUM possible stay: a guest books a room "for up to 32 nights" (max context = 32k tokens) — the hotel blocks that room for 32 nights — and the guest leaves after 2. The room sits empty, un-sellable, for 30 nights. Now scale: EVERY guest books "up to 32 nights," almost all leave after 2–5, and the hotel (GPU memory) refuses new guests because it's "full" of empty reserved rooms. Measured in early serving stacks: **60–80% of KV memory wasted** to this preallocation plus fragmentation. That waste is directly lost concurrency — §1.2's floor-space arithmetic again.
 
-**The fix — OS memory paging applied to KV cache (vLLM's PagedAttention), step by step:**
-1. KV cache is split into fixed-size BLOCKS (pages), like process memory in an OS.
-2. A request's KV grows block-by-block, on demand — allocate only what's used. No max-preallocation, no fragmentation (a request's logical sequence maps to physical blocks via a page table — non-contiguous is fine).
-3. Identical prefixes are SHARED: 1,000 concurrent requests with the same 2k-token system prompt → ONE copy of those blocks in memory, referenced by all 1,000 page tables. Copy-on-write if a request diverges (which they don't, for prefixes).
+**The fix — run it like an actual hotel:** charge for the nights actually used, allow room splits, and let identical groups share.
+1. KV cache is split into fixed-size BLOCKS (pages) — a guest's stay is built night-by-night, room-by-room, on demand. Allocate only what's used.
+2. A request's KV grows block-by-block as generation continues; a page table maps its logical sequence to physical blocks — non-contiguous is fine (the guest doesn't need all rooms on the same floor).
+3. Identical prefixes are SHARED: 1,000 concurrent requests with the same 2k-token system prompt → ONE set of blocks in memory, referenced by all 1,000 page tables. Like 1,000 tour groups all visiting the same museum — the museum exists once. Copy-on-write if a request diverges (which they don't, for prefixes).
 
-**The effect:** 2–4× more concurrent requests per GPU from the same hardware — the single most citable serving optimization. Know its name, its mechanism (pages + sharing), and its effect size.
+**The effect:** 2–4× more concurrent requests per GPU from the same hardware — the single most citable serving optimization. Know its name (vLLM's PagedAttention), its mechanism (pages + sharing — the OS memory trick applied to KV cache), and its effect size.
 
 ### 1.10 Token-Based Rate Limiting
 
@@ -156,11 +157,13 @@ Both sides needed: pre-check without post-metering drifts from reality; post-met
 
 **Plain words:** many teams/customers share one LLM platform.
 
-**Full explanation — build the picture problem by problem:** you've built a gateway; 40 teams onboard. Within a month, all three classic problems arrive, usually in this order:
+**The story — your first month running the platform (all three problems arrive in order, as they always do):** you've built a gateway; 40 teams onboard. Week 2: a support ping at 2 AM — "the bot is so slow tonight." You check: GPU utilization fine, queue depth fine for... the RISK TEAM's 200k-document nightly job, which has been queuing since 1 AM. The analyst's innocent late-night query waits 30 seconds behind it. Same hardware, one workload strangling everyone — **the noisy neighbour**, and it arrives first. Week 3: finance asks "the AI bill is ₹19L this month — whose is it?" and you have no answer, because nobody attributed tokens to teams — **the billing/fairness problem.** Week 4: a security audit finds that the support-bot team's prompts (customers' personal details) appear in the analytics team's cache — one cache shared across tenants without tenant-scoped keys — **the isolation problem**, and it's a severity-1 incident, not a bug.
 
-1. **Noisy neighbour:** the risk team's nightly job scores 200k documents through the same capacity serving everyone's chat traffic. At 2 AM their requests queue; an analyst with a late-night query waits 30 seconds behind them. Same hardware, one workload hurting everyone. The fix ladder, in order: per-tenant token quotas (hard consumption ceiling — §1.10), priority queues (real-time interactive > batch), off-peak scheduling for batch jobs, and — if contention persists — physically separate capacity pools for latency-sensitive vs batch workloads.
-2. **Fairness & billing:** 40 teams sharing a bill means every token must be attributable — per-tenant metering (tokens, cost, by model, by use case), monthly showback/chargeback, per-tenant dashboards so teams see their own burn. This bookkeeping is why finance loves gateways.
-3. **Isolation:** tenant A's prompts must never appear in tenant B's context, caches, logs, or evaluation sets. Enforcement: cache keys that include tenant IDs (a cache-key bug = cross-tenant data leak — a real incident class), tenant-scoped guardrail configs and rate limits, access-controlled logs, tenant-separated eval sets. Isolation failures are severity-1 security incidents, not bugs.
+Each problem and its fix, formally:
+
+1. **Noisy neighbour:** the fix ladder, in order: per-tenant token quotas (hard consumption ceiling — §1.10), priority queues (real-time interactive > batch), off-peak scheduling for batch jobs, and — if contention persists — physically separate capacity pools for latency-sensitive vs batch workloads.
+2. **Fairness & billing:** 40 teams sharing a bill means every token must be attributable — per-tenant metering (tokens, cost, by model, by use case), monthly showback/chargeback, per-tenant dashboards so teams see their own burn. This bookkeeping is why finance loves gateways. (The showback table below shows its political effect.)
+3. **Isolation:** tenant A's prompts must never appear in tenant B's context, caches, logs, or evaluation sets. Enforcement: cache keys that include tenant IDs (a cache-key bug = cross-tenant data leak — the week-4 incident), tenant-scoped guardrail configs and rate limits, access-controlled logs, tenant-separated eval sets. Isolation failures are security incidents, not bugs.
 
 **The monthly showback table (what multi-tenant metering produces — and the political effect worth mentioning in interviews):**
 
@@ -318,15 +321,15 @@ Then sanity-check tokens/sec throughput (concurrent × avg TPS demand ≤ fleet 
 
 ### 5.1 Distributed Training (concepts)
 
-**Data Parallelism — the default:** every GPU holds a FULL copy of the model; each processes a different slice of data; after each step, gradients are averaged across all GPUs (the "all-reduce" collective). Simple, scales well — but the model must FIT on one GPU. Training LLMs would be impossible for one GPU → the next two patterns exist.
+**The story — one factory, three ways to scale (this single story explains all three parallelisms):** you must build 1,000 toy cars a day (train a model too big for one machine). One worker can't do it alone. Your options:
 
-**Tensor Parallelism — splitting the math:** ONE layer's matrix multiply is SPLIT across GPUs — each holds a slice of every weight matrix; partial results combine at each layer boundary. Fine-grained communication every layer → needs NVLink-class interconnects → used WITHIN a node. Analogy: four people each multiplying different columns of the same spreadsheet, then stapling the results.
+- **Data parallelism — clone the factory:** every worker (GPU) builds cars alone with a FULL copy of the blueprint (the whole model), each assembling different toys (different data batches). Problem: everyone's blueprints must stay IDENTICAL — so every evening, all workers compare notes and adjust their blueprints together (all-reduce: averaging gradients across GPUs). Simple, scales well — but the blueprint must fit on ONE worker's desk. This is the default, and its limit (model doesn't fit on one GPU) is why the next two exist.
+- **Tensor parallelism — split each TASK:** the blueprint is one giant car too big for any desk. Split the blueprint's WIDTH: worker 1 builds the left half of every car, worker 2 the right half, and they SNAP HALVES TOGETHER at every step (each layer's matrix multiply split across GPUs; partial results combined at layer boundaries). Workers must coordinate constantly, arm's-length apart — works WITHIN one node (NVLink interconnect). Like four people multiplying different columns of the same spreadsheet, stapling results each row.
+- **Pipeline parallelism — the assembly line:** cut the blueprint into STAGES: worker 1 does the chassis, passes to worker 2 who does the body, who passes to worker 3 for paint. Each worker holds only THEIR stage of the blueprint (their layers — GPU1 holds layers 1–20, GPU2 holds 21–40). Coordination only at handoffs → works ACROSS nodes. Weakness: "bubbles" — while worker 1 builds the first chassis, workers 2 and 3 stand idle; fix by keeping multiple cars flowing (micro-batches).
 
-**Pipeline Parallelism — splitting the layers:** the model is cut by LAYERS — GPU1 holds layers 1–20, GPU2 holds 21–40, like an assembly line. One request flows through stages. Communication happens only at stage boundaries → less chatter → works ACROSS nodes. Weakness: "bubbles" — stage 2 idles while stage 1 processes, until you feed multiple micro-batches to keep all stages busy.
+**The sentence to say (one sentence, full marks):** *"Tensor parallel within a node, pipeline parallel across nodes, data parallel on top."* That's how frontier training clusters are laid out — tensor splits the math (needs fast interconnect → in-node), pipeline splits the layers (only boundary handoffs → cross-node), data parallel clones everything (scales horizontally).
 
-**The sentence to say (one sentence, full marks):** *"Tensor parallel within a node, pipeline parallel across nodes, data parallel on top."* That's how frontier training clusters are laid out.
-
-**Distributed Checkpoints:** training state saved across ALL GPUs such that any node dying mid-run costs only the work since the last checkpoint. Multi-week runs MUST survive hardware that doesn't — checkpoint frequency is the trade (checkpoint overhead vs re-work on failure).
+**Distributed Checkpoints:** training state saved across ALL GPUs such that any node dying mid-run costs only the work since the last checkpoint. Multi-week runs MUST survive hardware that doesn't — checkpoint frequency is the trade (checkpoint overhead vs re-work on failure). Like a video game save point: dying is fine; redoing three weeks is not.
 
 ### 5.2 Distributed Inference
 
