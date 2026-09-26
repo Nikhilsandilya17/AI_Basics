@@ -10,22 +10,22 @@
 
 **Plain words:** An LLM cannot read letters or words. It reads **tokens** — small chunks of text, roughly ¾ of a word in English.
 
-**Full explanation — why tokens exist at all:**
+**The story that explains why tokens exist (told like the spam-filter story in File 01):**
 
-Computers need text as numbers. The naive mapping — one number per letter — fails: letters carry almost no meaning alone, and letter-sequences get enormous (a page = thousands of letters, and the model's attention has to relate very distant positions). The other naive mapping — one number per word — fails too: English has hundreds of thousands of words, plus names, typos, slang, technical identifiers, and every other language's words. A vocabulary that big wastes capacity, and any word not in it is literally unreadable.
+You're building a translator between English and a machine. You must turn text into numbers. Option A: **one number per letter**. 'c'=3, 'a'=1, 't'=20. It works... but look at what you've done: the model now must learn meaning from LETTERS — and letters carry almost nothing. "cat" and "car" differ by one letter. A page becomes thousands of meaningless units, and any relationship between distant parts of the page must stretch across all of them. Option B: **one number per word**. Better units! But now count your dictionary: English has hundreds of thousands of words — plus names ("Nikhil"), typos ("refnud"), slang, code identifiers (`getUserBalance`), and every word of every other language. Any word missing from your list is literally UNREADABLE. A model serving 2026's internet with a frozen 2019 vocabulary would choke on "rizz" on day one.
 
-The compromise that won: **subword chunks.** Common words stay whole ("the", "hello", "computer"); rare words decompose into meaningful pieces ("unbelievable" → "un" + "believ" + "able"); and ANY text — new words, typos, Hindi, code — can always be represented as some sequence of known chunks. You never hit an unreadable input, and you never waste vocabulary on rare words.
+So both pure options fail — and the compromise that won (subword chunks) is beautifully simple: keep a vocabulary of ~100k units where common words stay whole ("the", "hello", "computer"), rare words decompose into meaningful pieces ("unbelievable" → "un" + "believ" + "able"), and ANY text — new words, typos, Hindi, code — can ALWAYS be written as some sequence of known chunks, the same way you can spell any word with 26 letters. You never hit an unreadable input, and you never waste vocabulary slots on rare words.
 
-**Concrete examples (trace through these out loud once):**
+**Now see it in action (trace these out loud once):**
 - `"Hello world"` → ["Hello", " world"] = 2 tokens
-- `"unbelievable"` → ["un", "believ", "able"] = 3 tokens
+- `"unbelievable"` → ["un", "believ", "able"] = 3 tokens — a 12-letter word, only 3 units
 - `"strawberry"` → ["str", "aw", "berry"] = 3 tokens — three chunks, NOT ten letters
-- `"getUserBalance()"` → ["get", "User", "Balance", "()",] = 4 tokens
+- `"getUserBalance()"` → ["get", "User", "Balance", "()"] = 4 tokens
 - A 1,000-word essay ≈ 1,300 tokens
 
-**The strawberry story (the single best example of why tokenization matters):** when older models were asked "how many r's are in strawberry?", many got it wrong — some said 2. Why? The model never SEES the letters. It sees the token "berry" as ONE opaque unit. To count r's it must RECALL, from training data, how that chunk is spelled — memory, not observation. Newer models fix this by "thinking step by step": they write the word out letter by letter ("s-t-r-a-w-b-e-r-r-y"), which turns one opaque token into many simple tokens, each of which IS a single letter they can count. The lesson interviewers love: **tokenization is not a cosmetic detail — it shapes what models can and cannot do.**
+**The strawberry story (the single best example of why tokenization matters):** in 2023, people asked ChatGPT "how many r's are in strawberry?" and it answered **2**. The internet exploded: how can a "genius" model fail at counting letters? Now you know exactly why: the model never SEES letters. It sees "berry" as ONE opaque unit — token #47281, one number. To count r's it must RECALL, from training data, how that chunk is spelled — memory, not observation. And memory can be fuzzy. Newer models fix this by "thinking step by step": they write the word out letter by letter ("s-t-r-a-w-b-e-r-r-y") — which turns one opaque token into ten simple tokens, each of which IS a single letter they can actually look at. The lesson interviewers love: **tokenization is not a cosmetic detail — it shapes what models can and cannot do.**
 
-**Why tokens matter more than words (the four engineering consequences):**
+**Why engineers care more about tokens than words (four consequences):**
 1. **Pricing** — providers charge per token, not per word or per request. Every cost conversation is a token conversation.
 2. **Limits** — context windows are measured in tokens (§1.3).
 3. **Speed** — generation happens token-by-token; response time scales with OUTPUT token count (§1.7).
@@ -91,7 +91,7 @@ The moment history grows, something else must shrink — trimming history, or fe
 
 **Rule 4 — the window RESETS every request.** The model itself has NO memory between requests. Chat "memory" is an illusion created by the application: the ENTIRE conversation is re-sent as the prompt each turn. Turn 10 re-sends turns 1–9 — which is why long chats get expensive, and why every chat product eventually implements trimming/summarization (context management — File 04 §3.12, File 05 Part 2).
 
-**Analogy:** a whiteboard you fully erase and rewrite for every question. If the whole conversation fits on the board, the model "remembers" it. When it stops fitting, YOU — the engineer — decide what stays on the board. That decision (what to trim, what to summarize, what to offload to a store and retrieve later) is a core AI-engineering skill, not a detail.
+**The whiteboard story (say this in interviews — it makes Rule 4 unforgettable):** imagine the model is an expert consultant who, for EVERY question, walks into a fresh room with a whiteboard. Whatever is written on the board when you ask — that's ALL they know. They read the board, answer, and LEAVE. The room's whiteboard is wiped for the next person. Want them to "remember" the conversation? YOU write the whole conversation on the board before they walk in. Turn 10 means writing turns 1–9 plus the new question — every single time. If the board (8k tokens) fills up, you — the engineer — choose what stays: erase the stale middle (summarize history), leave only the last few exchanges verbatim, or move details to a filing cabinet in the corner (a vector store) and pin a sticky note "ask the cabinet if you need the 2024 pricing." That choice — what stays on the board — is the entire craft of context management. The model is brilliant; the memory is YOUR infrastructure.
 
 ### 1.4 Prompt vs Completion
 
@@ -109,21 +109,19 @@ The moment history grows, something else must shrink — trimming history, or fe
 
 **Plain words:** Instead of waiting for the whole answer, the server sends each token the moment it's generated. Live cricket vs. highlights after the match.
 
-**Full explanation — the UX math first, then the engineering:**
-
-The math that makes streaming near-mandatory: a 500-token answer at 50 tokens/second takes 10 seconds. A blank screen for 10 seconds feels broken; words appearing from second 0.2 feels responsive — even though TOTAL time is identical. Perceived latency is dominated by TIME TO FIRST TOKEN, and streaming is how you minimize it. Non-streaming chat products feel 5–10× slower than they are.
+**The story that sells it (feel the numbers):** a 500-token answer at 50 tokens/second takes 10 seconds. Watch a user's face in each world: without streaming, they stare at a spinner for 10 seconds — by second 3 they think it's broken; by second 7 they're re-submitting. With streaming, words start appearing at 0.2 seconds and keep flowing — the user READS as it generates. Same total time, but the first version feels 5–10× slower than the second. Perceived latency is almost entirely TIME TO FIRST TOKEN — streaming is how you buy that. No streaming in a chat product is not a "small UX issue"; it's shipping a product that feels broken while working correctly.
 
 **The engineering implications, one by one:**
 
 1. **Transport:** SSE (Server-Sent Events) over HTTP is the standard — a long-lived HTTP connection where the server pushes `data:` frames. WebSockets when you need bidirectional (voice, multi-party). The wire format for OpenAI-style streaming: each SSE frame carries one chunk (one or a few tokens + role/finish metadata), ending with a `data: [DONE]` sentinel.
 
-2. **The buffering trap (a classic silent production bug):** load balancers, reverse proxies, and CDNs love to BUFFER responses for efficiency — they collect the whole response, then forward. For SSE that's fatal: the user stares at nothing, then receives the entire answer at once. Config must disable buffering for streaming routes (X-Accel-Buffering: no, flush-zones, etc.). If a stream "doesn't stream," check the middleboxes first.
+2. **The buffering trap (the classic silent production bug — a war story every team lives once):** the team ships streaming. Demo works perfectly — tested against the model API directly. In production... the spinner spins for 8 seconds, then the whole answer appears at once. Nothing "failed." The culprit: a reverse proxy/load balancer between the app and the user, doing its standard job of collecting the complete response before forwarding (great for HTML pages, fatal for streams — the whole point of the stream is delivery AS IT GENERATES). Fix: disable response buffering on streaming routes (X-Accel-Buffering: no, flush zones). The lesson: test streaming THROUGH THE FULL PATH — proxy, LB, CDN, gateway — not just direct-to-model. If a stream "doesn't stream," suspect the middleboxes first.
 
 3. **Downstream complexity:** output validation/moderation now runs on streams — you cannot fully validate a response you haven't fully received (File 06 §3.8 handles this: guardrails on completion, or incremental checks on accumulated text). Error handling changes: what if the stream dies at token 300? Clients need reconnect and partial-response handling; billing must handle partial outputs.
 
 4. **Timeout semantics change:** a 30s response-timeout is wrong for a stream — the right pattern is a per-chunk timeout ("no token for 5 seconds = dead") plus a total wall-clock cap. Timeouts become two-dimensional.
 
-5. **Backpressure:** if the client reads slowly (mobile on bad network), server-side buffers fill; well-designed streaming stacks apply backpressure rather than buffering unboundedly.
+5. **Backpressure:** if the client reads slowly (mobile on bad network), server-side buffers fill; well-designed streaming stacks apply backpressure rather than buffering unboundedly. (Backpressure in one sentence: bounded buffers fill → the producer is made to wait → generation slows to the slowest reader, instead of memory growing until the server dies. TCP receive windows already do this at the transport layer; your app must not defeat it with "helpful" buffering.)
 
 ### 1.6 Time to First Token (TTFT)
 
@@ -225,11 +223,16 @@ Every token's representation is projected into three vectors:
 
 The library analogy, fully: every book has an index card (K) describing what it's about. Your search query (Q) is matched against all index cards. The better the match, the more of that book's content (V) you take home. You leave with a BLEND — mostly the best-matching books, a little of the others.
 
-The mechanics for one token, in four steps:
-1. **Score:** compute the dot product of its Q with every previous token's K → a similarity score per token. (Dot product = "how aligned are these two directions" — big = similar.)
-2. **Scale:** divide scores by √d (d = the vector dimension) — a numerical-stability trick keeping softmax inputs from saturating. The full formula: `softmax(QKᵀ/√d) · V`. Interviews want the FLOW, not the derivation — but write the formula if you can.
-3. **Softmax:** scores become positive weights summing to 1 — a spotlight allocation: 70% on "animal", 5% on "street", the rest scattered.
-4. **Blend:** the token's new representation = weighted average of all the V vectors. "It" has now absorbed exactly the context that matters to it — it means "the animal" in this sentence.
+**Now watch it work as a story — resolving "it" in our example sentence (follow the four steps for the token "it"):**
+
+The sentence so far: "The animal didn't cross the street because it". The model must now understand the word "it" — and its meaning is ambiguous until attention resolves it. Four steps happen INSIDE one attention head:
+
+1. **Score:** "it" projects its Query vector — essentially "*I'm a pronoun, I'm looking for my referent — likely a recent singular noun*." Every previous token's Key gets matched against it via dot product. "animal"'s Key ("I'm a singular noun, an agent capable of being tired") matches strongly → high score. "street"'s Key ("I'm a noun, a surface, not capable of tiredness") matches weakly → low score. "the", "because", "cross" — near zero.
+2. **Scale:** scores get divided by √d — a purely numerical trick so the softmax in step 3 doesn't saturate (skip the detail unless asked; keep the flow).
+3. **Softmax:** raw scores become percentages that sum to 100% — the attention spotlight: "animal" 72%, "street" 4%, "tired"-candidates and the rest sharing the remainder.
+4. **Blend:** "it"'s new representation = 72% of animal's Value + 4% of street's Value + scattered bits. The token "it" has now literally BECOME mostly-animal in the model's internal representation — the ambiguity is resolved, and every later layer works with a token that "means" the animal.
+
+That's all attention is — repeated for every token, every layer, every head: *score everything against me, convert to percentages, absorb a weighted blend.* The full formula if you can write it: `softmax(QKᵀ/√d) · V`.
 
 **Multi-head attention — why many small attentions beat one big one:** run several small attentions in parallel (e.g., 32 heads, each with smaller vectors), each with its own learned Q/K/V projections. Different heads learn different relations — empirically, some heads track pronoun references, others syntax agreement, others long-range topic. Outputs concatenate and mix. Like 32 specialists each reading the sentence for a different purpose, then comparing notes. This is also why attention cost scales with (context length)² — every token attends to every token — the quadratic cost that makes long contexts expensive (§1.3).
 
@@ -237,7 +240,19 @@ The mechanics for one token, in four steps:
 
 ### 2.3 Prefill vs Decode — the two phases of every request
 
-This distinction unlocks half of Track 13. Internalize both phases, their hardware characters, and their consequences:
+This distinction unlocks half of Track 13. Internalize both phases, their hardware characters, and their consequences.
+
+**The story first — one request, watched as a movie (follow it start to finish):**
+
+A user asks a chatbot a question with a 2,000-token prompt. Press play.
+
+- **The reading phase (prefill):** all 2,000 prompt tokens enter the model AT ONCE, together, in one giant parallel sweep. The GPU — thousands of cores doing the same operation on different data — devours it. For our 2,000 tokens this takes maybe half a second. While reading, the model does something crucial for later: for EVERY token it computes and saves those K and V vectors (§2.2) — like a student reading the exam paper and TAKING NOTES on every line, because those notes are what they'll consult while writing the answer. This phase IS your TTFT — the user sees a spinner until prefill completes.
+
+- **The writing phase (decode):** now the answer must be written — and here the movie changes genre. Token 1 comes out... then token 2... then 3. Each single token is a full forward pass through the whole model — and each one NEEDS the previous token to exist first (causal masking: you can't predict the 4th word before the 3rd exists). The brilliant parallel machine is suddenly forced to work one-word-at-a-time, like a racehorse pulling a rickshaw. The student consults their NOTES (the KV cache — §2.4) instead of re-reading the paper — that's what makes each step fast at all.
+
+- Why is writing so much slower than reading? Reading 2,000 tokens in parallel ≈ 0.5s; writing 300 tokens one-at-a-time ≈ 6s. Prefill uses every core at once; decode can't be parallelized — token N waits for token N−1. Same GPU, same model, 10× difference — purely because of the shape of the work.
+
+**Now the two phases, formally:**
 
 **Prefill (once, at request start):**
 - Your ENTIRE prompt is processed — all tokens simultaneously, in parallel. GPUs are massively parallel machines; this phase is what they were built for.
@@ -257,19 +272,20 @@ This distinction unlocks half of Track 13. Internalize both phases, their hardwa
 
 ### 2.4 KV Cache — the trick that makes LLMs usable
 
-**The problem it solves, quantified:** generating token #500 requires attention over the previous 499 tokens — and attention needs each one's K and V. Without a cache, EVERY decode step recomputes K/V for the entire history: step N costs N token-computations, total = 1+2+...+N ≈ N²/2 — quadratic. A 1,000-token generation ≈ 500,000 redundant computations. Untenable.
+**The story first — watch the disaster without it:** you're generating token #500 of an answer. That token needs ATTENTION over the previous 499 tokens (§2.2) — and attention needs each one's K and V vectors. Without any cache, here's your per-token reality: to write word 500, recompute K/V for words 1–499. Then for word 501... recompute K/V for words 1–500 AGAIN. Word 502: again. Each step re-does the ENTIRE history. Count the total work: 1 + 2 + 3 + ... + N ≈ N²/2 — for a 1,000-token answer, ~500,000 computations of which ~99% are pure re-doing of work you already did. The model would be unusably slow — this isn't an optimization, it's THE thing that makes generation viable at all.
 
-**The trick:** during prefill, compute each prompt token's K and V and STORE them in GPU memory. During decode, compute K/V only for the NEW token; reuse everything cached. Each step becomes one small increment instead of a full history recomputation. Total work drops from quadratic to linear.
+**The fix (and it's beautifully simple):** while READING the prompt (prefill — §2.3), you computed K/V for every prompt token anyway. DON'T THROW THEM AWAY — store them in GPU memory. Now, writing word 500 doesn't recompute anything: it computes K/V only for the NEW token (one small increment) and reuses all 499 stored vectors. Total work drops from quadratic (N²/2) to linear (N). Same answer, same math, thousands of times less compute. The exam-student picture: read the paper once, TAKE NOTES on every line, then write the answer consulting your notes — instead of re-reading the whole paper before writing each word.
 
-**The cost — the memory math (be able to reason through this live, even if you don't memorize the formula):**
+**But the notes cost paper — the memory bill (be able to reason through this live):**
 
 ```
 KV cache size = 2 (K and V) × num_layers × num_kv_heads × head_dim
                × context_length × batch_size × bytes_per_value
 ```
-What matters is the SCALING: cache grows LINEARLY with context length AND with concurrent requests. Worked intuition for a 70B-class model: serving 32k-token contexts can consume tens of GB of KV cache — per batch. Practical consequences that follow (recite these):
+What matters is the SCALING: cache grows LINEARLY with context length AND with concurrent requests. Worked intuition for a 70B-class model: serving 32k-token contexts can consume tens of GB of KV cache — per batch. The notes pile up fast: every word of every conversation, held in GPU memory for the duration of the request.
 
-1. GPU memory = weights + KV cache + activations (File 03 §1.2). Once memory is full, no new requests fit — **concurrency per GPU is memory-limited, not compute-limited.**
+**And this one bill explains five facts you must know (trace each back to the cache):**
+1. GPU memory = weights + KV cache + activations (File 03 §1.2). Once memory is full, no new requests fit — **concurrency per GPU is memory-limited, not compute-limited.** The GPU might sit at 40% compute with requests queuing — out of "paper."
 2. That's why a 70B model serves fewer concurrent users than an 8B — its weights eat the memory the KV cache needs.
 3. That's why long context is expensive — not just tokens-billed, but memory-per-request.
 4. That's why quantization helps TWICE: smaller weights (more room for cache) and optionally smaller KV values (FP8 KV cache).
@@ -304,14 +320,15 @@ What matters is the SCALING: cache grows LINEARLY with context length AND with c
 
 ### 3.1 Quantization
 
-**Plain words:** storing the model's numbers in smaller boxes. Original weights are FP16 (2 bytes per value). Quantization stores them as 8-bit or 4-bit — same model, less memory, slightly less precision.
+**The story first — the engineer's Friday problem:** you need to serve a 70B model. Its 70 billion weights are stored as FP16 — 2 bytes each. Open the calculator: 70B × 2 = **140 GB**. Your GPU has 80 GB. The model doesn't fit — you need 2 GPUs just to HOLD the thing, before serving a single user, before even one token of KV cache (§2.4). Meanwhile your colleague serves an 8B model on one GPU with room to spare, and your budget has one GPU in it. What do you do?
 
-**Full explanation — the arithmetic that motivates it:**
-- 70B parameters × 2 bytes (FP16) = 140 GB — doesn't fit on one 80GB GPU; needs 2+ GPUs just to HOLD it, before serving a single token.
-- INT8 (1 byte) = 70 GB — fits on one GPU.
-- INT4 (0.5 byte) = 35 GB — fits with tens of GB left over for KV cache → more concurrent users (§2.4's memory equation).
+The insight that saves the day: those 2 bytes per weight store numbers with a precision the model doesn't fully need. A weight's value is something like 0.0004721 — but does the model's BEHAVIOR depend on the difference between 0.0004721 and 0.00047? Not meaningfully. So shrink the boxes: store each weight in 1 byte (INT8) or half a byte (INT4), keeping a small scale factor to map back. Watch the arithmetic cascade:
 
-And it's FASTER, not just smaller: decode is memory-bandwidth-bound (§2.3) — smaller weights = less memory traffic per step = higher TPS, roughly proportionally. Quantization attacks both cost AND latency at once.
+- FP16 (2 bytes) = 140 GB → needs 2+ GPUs just to hold it
+- INT8 (1 byte) = 70 GB → fits on one GPU
+- INT4 (0.5 byte) = 35 GB → fits with 45 GB left over — and that leftover is KV cache room, which is CONCURRENT USERS (§2.4's memory equation)
+
+And it's FASTER, not just smaller: decode is memory-bandwidth-bound (§2.3) — smaller weights = less memory traffic per step = higher TPS, roughly proportionally. One change attacks memory, cost, AND speed at once.
 
 **How it works, mechanically:** quantization maps ranges of FP16 values onto a smaller grid of representable values (256 levels for 8-bit, 16 for 4-bit), with a scale factor per weight-group. Two families to name: **weight-only quantization** (weights quantized, activations stay high precision — most of the memory/speed win, lower quality risk; GPTQ and AWQ are the named methods) and full quantization. **GGUF** is the file format family popularized by llama.cpp for local models — a name to recognize.
 
@@ -319,7 +336,7 @@ And it's FASTER, not just smaller: decode is memory-bandwidth-bound (§2.3) — 
 
 ### 3.2 Model Compression (beyond quantization)
 
-**Distillation — the main technique, fully explained:** train a small "student" model to imitate a large "teacher" model. The key subtlety that makes it work better than training the small model directly: the student learns from the teacher's full output DISTRIBUTION (soft labels — "fraud 91%, unusual 7%, normal 2%") rather than hard labels ("fraud"). The distribution carries the teacher's knowledge of what ALMOST applied — much more signal per example than a single correct answer. Result: a 7B student often retains ~90% of a 70B teacher's quality on a NARROW task at ~10× lower serving cost. The use-case pattern: pick your highest-volume single task (ticket tagging, extraction, classification) and distill a specialist for it — not "a smaller ChatGPT."
+**Distillation — the main technique, told as a story:** you have a 70B "teacher" that classifies support tickets brilliantly — and a bill that makes you cry. You want a 7B "student" that does this ONE task as well. Option A: train the 7B from scratch on the labeled tickets — it learns the mapping, but slowly, and it misses everything the teacher knows about *near-misses*. Option B (distillation): have the 7B learn by imitating the teacher's full output DISTRIBUTION. The difference is the secret: on a fraud ticket, a hard label says "fraud." The teacher's output says "fraud 91%, unusual 7%, normal 2%" — which quietly encodes "*this was nearly an 'unusual' case; here's exactly how close it was*." That per-example richness is far more signal than a single correct answer; the student learns the teacher's judgment, not just its verdicts. Result: a 7B student often retains ~90% of a 70B teacher's quality on a NARROW task at ~10× lower serving cost. The use-case pattern: pick your highest-volume single task (ticket tagging, extraction, classification) and distill a specialist for it — not "a smaller ChatGPT."
 
 **Pruning:** delete weights that contribute little — neural networks are heavily over-parameterized, and many weights are near-zero. Structured pruning removes whole neurons/channels (real speedup, some quality loss, harder to do well); unstructured sparsity is mostly a research topic. Mention if asked; less practically important today than quantization and distillation.
 
