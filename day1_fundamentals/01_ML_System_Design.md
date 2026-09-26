@@ -468,6 +468,23 @@ Triggers for retraining, in order of sophistication:
 - **Retrain (from scratch):** fresh random start, learn everything from new data. Thorough but expensive. Common for classic ML models (trees, regressors) where full retraining is cheap.
 - **Fine-tune (from existing weights):** start from the current model's weights, continue training on fresh data. Cheap, fast. Common for deep learning and LLMs.
 
+**"Train on WHAT data?" — the follow-up you WILL get (old model was trained on X; new data collected since is Y — which do you feed?):**
+
+**The answer: almost always X+Y (full accumulated history), not Y alone.** Retraining from scratch on all accumulated data is the default; training only on fresh data is "continual/online learning," which exists but has problems. The reasoning, point by point:
+1. **Y alone is too narrow.** If the last 3 months of data is all you train on, the model forgets everything else — a fraud model trained only on last quarter's fraud patterns loses the long tail of older fraud types that still occur. Models need volume; Y alone is usually a fraction of X.
+2. **Old patterns still matter.** Drift means the distribution SHIFTED, not that the past became irrelevant. Diwali spikes, year-end tax scams — seasonal patterns from years ago repeat; you need that history.
+3. **Catastrophic forgetting.** Fine-tuning repeatedly on only-new data makes neural networks literally forget old knowledge — a well-documented failure mode. Retraining from scratch on X+Y sidesteps it entirely.
+
+**Practical refinements on the X+Y theme (each solves a real problem with "literally all data ever"):**
+- **Rolling window:** X+Y where "X" is a trailing window (e.g., last 24 months), not literally everything — balances recency against stale data and storage cost.
+- **Recency weighting:** keep all of X but weight recent rows more heavily (e.g., 0.9 decay per quarter) — recency without amnesia.
+
+**When Y-only (continual learning) IS used:**
+- **Online learning** (streaming fraud detection): tiny frequent updates on fresh data only — but these are INCREMENTAL updates to the existing model, not fresh training, and they're paired with drift monitors precisely because they can drift badly.
+- **Warm-start fine-tune:** take the existing model and fine-tune briefly on Y — cheap, but risks forgetting; usually needs rehearsal data (a replay mix of old samples + Y) to prevent it.
+
+**The one-liner to memorize:** *"Retraining re-runs the full pipeline on accumulated data — typically a rolling window of all history, sometimes recency-weighted — because training on only-new data makes the model forget the long tail. Pure new-data-only training is continual learning: cheaper, but it needs replay buffers and drift guards."*
+
 And note the vocabulary subtlety: for LLMs, "fine-tuning" usually means adapting a PRE-TRAINED model to a specific task/style (File 02 §4.3) — different context, same word. Clarify which meaning is intended when asked.
 
 **The deployment-safe rule:** retrained model → full evaluation on golden datasets → canary rollout (never big-bang) → monitor → promote or rollback. The loop closes.
