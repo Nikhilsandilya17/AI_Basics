@@ -1,4 +1,4 @@
-# AI Interview Prep — 2-Day Study Plan (Birla AI Labs)
+# AI Interview Prep — 2-Day Study Plan
 
 Source: Advanced AI System Design Course (AlgoCamp) — Tracks 10, 12, 13, 14, 15, 16 (Track 11 excluded).
 Projects for discussion: **AgentHub** and **Godric** (PhonePe).
