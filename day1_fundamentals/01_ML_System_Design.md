@@ -396,7 +396,14 @@ What's stored per model: version number, which training run produced it (code co
 **Why it exists — the two questions it answers:**
 
 1. *"Something's wrong in production — which model is live, what was it trained on, and what did we change?"* Without a registry, the answer is "ask Rajesh, he ran the notebook in March." With a registry, it's a query.
-2. *"Roll back!"* When a new model misbehaves, you repoint serving to the previous version — which is still sitting in the registry, tested and ready. Rollback without a registry means retraining the old model (hours/days) — unacceptable.
+2. *"Roll back!"* When a new model misbehaves, you repoint serving to the previous version — which is still sitting in the registry, tested and ready.
+
+**Why rollback without a registry can force RETRAINING (the failure chain, step by step):**
+1. **The old weights may simply not exist anymore.** A registry systematically stores model ARTIFACTS (the trained weights as files, often hundreds of GB for big models) + METADATA (which data version, which code, which training run, what metrics). Without one, nobody systematically keeps old versions — the new deploy may have overwritten the only copy, and the previous version's files are gone.
+2. **Even if a weights file exists somewhere, you can't trust it.** Is it really the v4.2 that scored 96.1%? Which data was it trained on? Without lineage (the registry's metadata), deploying that file is a gamble, not a rollback.
+3. **Reproduce = retrain.** If you can't locate or trust the old artifacts, the only way to get a KNOWN-GOOD model is to re-run the training pipeline with the recorded data and code versions — hours to days, while production serves a broken model.
+
+**The analogy:** deployments without version control. If you only ever copy the "latest" build over the previous one and it breaks, you can't go back — you must rebuild from source. Git is the registry for code; the model registry is git for weights. So the sentence's real meaning: *registry = the old version is guaranteed stored, versioned, tested, and one repoint away. No registry = you're hunting for files and hoping — and in the worst case, retraining.*
 
 **Real registries:** MLflow Model Registry, SageMaker Model Registry, Vertex AI Model Registry.
 
